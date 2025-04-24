@@ -2,167 +2,162 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
+using DotNetEnv;
+using Dapper;
+using Npgsql;
+using System.Data;
 
 class TaskItem
 {
-    public string Description { get; set; }
+    public int Id { get; set; }
+    public string Description { get; set; } = "";
     public DateTime Deadline { get; set; }
-    public bool IsCompleted { get; set; } = false;
-    public bool Reminded1Hr { get; set; } = false;
-    public bool Reminded5Min { get; set; } = false;
-    public bool FinalAlert { get; set; } = false;
+    public bool IsCompleted { get; set; }
 }
 
 class Program
 {
-    static List<TaskItem> tasks = new List<TaskItem>();
-    static void Main(string[] args)
-    {
-        // Start the background reminder thread
-        Thread reminderThread = new Thread(CheckReminders);
-        reminderThread.Start();
+    static string connectionString = "";
 
-        // Main user interaction loop
+    static async Task Main(string[] args)
+    {
+        // Load .env file and get DB connection string
+        DotNetEnv.Env.Load();
+        connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION") 
+                           ?? throw new Exception("DB_CONNECTION not found.");
+
+        // Start reminder thread
+        _ = StartReminderThread();
+
         while (true)
         {
-            Console.WriteLine("\n==== Task Manager ====");
+            Console.WriteLine("\n=== Task Manager (PostgreSQL) ===");
             Console.WriteLine("1. Add Task");
             Console.WriteLine("2. View Tasks");
             Console.WriteLine("3. Update Task");
             Console.WriteLine("4. Delete Task");
             Console.WriteLine("5. Exit");
-            Console.Write("Choose an option: ");
-            string input = Console.ReadLine();
+            Console.Write("Choose: ");
 
-            switch (input)
+            switch (Console.ReadLine())
             {
-                case "1":
-                    AddTask();
-                    break;
-                case "2":
-                    ViewTasks();
-                    break;
-                case "3":
-                    UpdateTask();
-                    break;
-                case "4":
-                    DeleteTask();
-                    break;
-                case "5":
-                    Environment.Exit(0);
-                    break;
-                default:
-                    Console.WriteLine("Invalid option. Try again.");
-                    break;
+                case "1": await AddTask(); break;
+                case "2": await ViewTasks(); break;
+                case "3": await UpdateTask(); break;
+                case "4": await DeleteTask(); break;
+                case "5": return;
+                default: Console.WriteLine("❌ Invalid choice."); break;
             }
         }
     }
 
-    static void AddTask()
-    {
-        Console.Write("Enter task description: ");
-        string desc = Console.ReadLine();
+    static IDbConnection DbConnection => new NpgsqlConnection(connectionString);
 
-        Console.Write("Enter deadline (yyyy-MM-dd HH:mm): ");
-        if (DateTime.TryParse(Console.ReadLine(), out DateTime deadline))
+    static async Task AddTask()
+    {
+        Console.Write("Description: ");
+        var desc = Console.ReadLine() ?? "";
+
+        Console.Write("Deadline (yyyy-MM-dd HH:mm): ");
+        if (DateTime.TryParse(Console.ReadLine(), out var deadline))
         {
-            tasks.Add(new TaskItem { Description = desc, Deadline = deadline });
-            Console.WriteLine("Task added successfully.");
+            var sql = "INSERT INTO Tasks (Description, Deadline, IsCompleted) VALUES (@desc, @deadline, false)";
+            using var db = DbConnection;
+            await db.ExecuteAsync(sql, new { desc, deadline });
+            Console.WriteLine("✅ Task added.");
         }
+        else Console.WriteLine("❌ Invalid date format.");
+    }
+
+    static async Task ViewTasks()
+    {
+        using var db = DbConnection;
+        var tasks = (await db.QueryAsync<TaskItem>("SELECT * FROM Tasks ORDER BY Deadline")).ToList();
+
+        if (!tasks.Any()) Console.WriteLine("No tasks yet.");
         else
-        {
-            Console.WriteLine("Invalid date format.");
-        }
-    }
-
-    static void ViewTasks()
-    {
-        if (tasks.Count == 0)
-        {
-            Console.WriteLine("No tasks yet.");
-            return;
-        }
-
-        for (int i = 0; i < tasks.Count; i++)
-        {
-            var t = tasks[i];
-            Console.WriteLine($"{i + 1}. {t.Description} | Deadline: {t.Deadline} | Status: {(t.IsCompleted ? "✅ Completed" : "❌ Not Completed")}");
-        }
-    }
-
-    static void UpdateTask()
-    {
-        ViewTasks();
-        Console.Write("Enter task number to update: ");
-        if (int.TryParse(Console.ReadLine(), out int index) && index >= 1 && index <= tasks.Count)
-        {
-            TaskItem t = tasks[index - 1];
-
-            Console.Write("Enter new description (leave blank to keep current): ");
-            string desc = Console.ReadLine();
-            if (!string.IsNullOrEmpty(desc))
-                t.Description = desc;
-
-            Console.Write("Enter new deadline (yyyy-MM-dd HH:mm) or leave blank: ");
-            string dateInput = Console.ReadLine();
-            if (!string.IsNullOrEmpty(dateInput) && DateTime.TryParse(dateInput, out DateTime newDeadline))
-                t.Deadline = newDeadline;
-
-            Console.Write("Mark as completed? (y/n): ");
-            string complete = Console.ReadLine();
-            t.IsCompleted = complete.Trim().ToLower() == "y";
-
-            Console.WriteLine("Task updated.");
-        }
-        else
-        {
-            Console.WriteLine("Invalid task number.");
-        }
-    }
-
-    static void DeleteTask()
-    {
-        ViewTasks();
-        Console.Write("Enter task number to delete: ");
-        if (int.TryParse(Console.ReadLine(), out int index) && index >= 1 && index <= tasks.Count)
-        {
-            tasks.RemoveAt(index - 1);
-            Console.WriteLine("Task deleted.");
-        }
-        else
-        {
-            Console.WriteLine("Invalid task number.");
-        }
-    }
-
-    static void CheckReminders()
-    {
-        while (true)
         {
             foreach (var t in tasks)
-            {
-                if (t.IsCompleted) continue;
-
-                TimeSpan timeLeft = t.Deadline - DateTime.Now;
-
-                if (!t.Reminded1Hr && timeLeft.TotalMinutes <= 60 && timeLeft.TotalMinutes > 55)
-                {
-                    Console.WriteLine($"\n🔔 Reminder: Task '{t.Description}' is due in 1 hour.");
-                    t.Reminded1Hr = true;
-                }
-                else if (!t.Reminded5Min && timeLeft.TotalMinutes <= 5 && timeLeft.TotalMinutes > 0)
-                {
-                    Console.WriteLine($"\n🔔 Reminder: Task '{t.Description}' is due in 5 minutes.");
-                    t.Reminded5Min = true;
-                }
-                else if (!t.FinalAlert && timeLeft.TotalSeconds <= 0)
-                {
-                    Console.WriteLine($"\n⏰ ALERT: Task '{t.Description}' was NOT completed on time!");
-                    t.FinalAlert = true;
-                }
-            }
-
-            Thread.Sleep(30000); // Check every 30 seconds
+                Console.WriteLine($"{t.Id}. {t.Description} | Due: {t.Deadline} | {(t.IsCompleted ? "✅ Done" : "❌ Pending")}");
         }
+    }
+
+    static async Task UpdateTask()
+    {
+        await ViewTasks();
+        Console.Write("Task ID to update: ");
+        if (int.TryParse(Console.ReadLine(), out int id))
+        {
+            using var db = DbConnection;
+            var task = await db.QueryFirstOrDefaultAsync<TaskItem>("SELECT * FROM Tasks WHERE Id = @id", new { id });
+            if (task == null) { Console.WriteLine("❌ Task not found."); return; }
+
+            Console.Write("New description (blank to skip): ");
+            var desc = Console.ReadLine();
+            if (!string.IsNullOrWhiteSpace(desc)) task.Description = desc;
+
+            Console.Write("New deadline (yyyy-MM-dd HH:mm): ");
+            if (DateTime.TryParse(Console.ReadLine(), out var newDeadline))
+                task.Deadline = newDeadline;
+
+            Console.Write("Mark as completed? (y/n): ");
+            task.IsCompleted = Console.ReadLine()?.ToLower() == "y";
+
+            await db.ExecuteAsync("UPDATE Tasks SET Description=@Description, Deadline=@Deadline, IsCompleted=@IsCompleted WHERE Id=@Id", task);
+            Console.WriteLine("✅ Task updated.");
+        }
+        else Console.WriteLine("❌ Invalid ID.");
+    }
+
+    static async Task DeleteTask()
+    {
+        await ViewTasks();
+        Console.Write("Task ID to delete: ");
+        if (int.TryParse(Console.ReadLine(), out int id))
+        {
+            using var db = DbConnection;
+            await db.ExecuteAsync("DELETE FROM Tasks WHERE Id = @id", new { id });
+            Console.WriteLine("🗑️ Task deleted.");
+        }
+        else Console.WriteLine("❌ Invalid ID.");
+    }
+
+    static Task StartReminderThread()
+    {
+        return Task.Run(async () =>
+        {
+            var alerted = new HashSet<(int, string)>();
+            while (true)
+            {
+                using var db = DbConnection;
+                var tasks = (await db.QueryAsync<TaskItem>("SELECT * FROM Tasks WHERE IsCompleted = false")).ToList();
+
+                foreach (var t in tasks)
+                {
+                    var left = t.Deadline - DateTime.Now;
+
+                    if (left.TotalMinutes <= 60 && left.TotalMinutes > 55 && !alerted.Contains((t.Id, "1hr")))
+                    {
+                        Console.WriteLine($"\n🔔 Reminder: Task '{t.Description}' due in 1 hour.");
+                        alerted.Add((t.Id, "1hr"));
+                    }
+
+                    if (left.TotalMinutes <= 5 && left.TotalMinutes > 0 && !alerted.Contains((t.Id, "5min")))
+                    {
+                        Console.WriteLine($"\n⚠️ Almost Due: '{t.Description}' in 5 mins.");
+                        alerted.Add((t.Id, "5min"));
+                    }
+
+                    if (left.TotalSeconds <= 0 && !alerted.Contains((t.Id, "due")))
+                    {
+                        Console.WriteLine($"\n⏰ OVERDUE: '{t.Description}' is overdue!");
+                        alerted.Add((t.Id, "due"));
+                    }
+                }
+
+                await Task.Delay(30000); // 30 seconds
+            }
+        });
     }
 }
